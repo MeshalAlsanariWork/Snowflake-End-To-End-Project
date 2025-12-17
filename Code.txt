@@ -1,0 +1,421 @@
+---- Personal snowflake Project ----
+---- set the context (database/warehouse/schema) ----
+
+create database GSITS_DB;
+create schema SALES_DATA;
+
+use database GSITS_DB;
+use schema GSITS_DB.SALES_DATA;
+
+create or replace warehouse COMPUTATION_WH with
+  WAREHOUSE_SIZE = XSmall 
+  INITIALLY_SUSPENDED = true;
+
+
+
+-- set the default for the user 
+
+alter user LEARNER set
+    default_role = Training_ROLE
+    default_warehouse = COMPUTATION_WH
+    default_namespace = GSITS_DB.SALES_DATA;
+
+SET dev_before_changes = current_timestamp();
+
+
+--- create the project 
+
+
+-- use seq in insert only 
+create or replace sequence primary_key_seq start=0 increment=1 order;
+
+
+
+create or replace table PRODUCTS(
+Product_Id int identity(1,1) primary key,
+Product_Name VARCHAR(50) not null,
+Category VARCHAR(50) not null, 
+Unit_Price int
+);
+
+INSERT INTO PRODUCTS (PRODUCT_NAME, CATEGORY, UNIT_PRICE)
+SELECT
+    'Product_' || SEQ4(),
+    CASE MOD(SEQ4(), 4)
+        WHEN 0 THEN 'Electronics'
+        WHEN 1 THEN 'Clothing'
+        WHEN 2 THEN 'Home'
+        ELSE 'Sports'
+    END,
+    UNIFORM(10, 500, RANDOM())
+FROM TABLE(GENERATOR(ROWCOUNT => 100));
+
+
+
+create or replace table SALES_TRANSACTIONS(
+TRANSACTION_ID int identity(1,1) primary key,
+TRANSACTION_TIMESTAMP TIMESTAMP_NTZ,
+Product_Id int,
+foreign key (Product_Id) references PRODUCTS (Product_Id),
+QUANTITY_SOLD int,
+SALE_AMOUNT number,
+REGION VARCHAR(50)
+);
+
+INSERT INTO SALES_TRANSACTIONS (
+    TRANSACTION_TIMESTAMP,
+    PRODUCT_ID,
+    QUANTITY_SOLD,
+    SALE_AMOUNT,
+    REGION
+)
+SELECT
+    DATEADD(day, -UNIFORM(0, 30, RANDOM()), CURRENT_TIMESTAMP()),
+    UNIFORM(1, 100, RANDOM()),   -- assumes PRODUCT_IDs 1–100
+    UNIFORM(1, 10, RANDOM()),
+    UNIFORM(20, 2000, RANDOM()),
+    CASE MOD(SEQ4(), 4)
+        WHEN 0 THEN 'NA'
+        WHEN 1 THEN 'EU'
+        WHEN 2 THEN 'APAC'
+        ELSE 'MEA'
+    END
+FROM TABLE(GENERATOR(ROWCOUNT => 100));
+
+
+-- create stage to load/onload the data 
+
+create or replace stage GSITS_SALES_STAGE;
+
+
+
+------------------------------------------------ 2.0 ------------------------------------------------
+------------------------ create File_format/load/unload the data using stage/------------------------
+------------------------ Multi-Table Insert, one large query using mutiple functions ------------------------
+
+-- create file format to use it when saving a data 
+
+create or replace  file format CSV_FORMAT
+type = 'CSV'
+field_delimiter = '|'
+ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE;
+
+
+
+-- unload the data to stage 
+
+copy into @GSITS_SALES_STAGE/Product
+from products
+file_format = (format_name = CSV_FORMAT)
+OVERWRITE = TRUE;
+
+copy into @GSITS_SALES_STAGE/SALES_TRANSACTIONS
+from SALES_TRANSACTIONS
+file_format = (format_name = CSV_FORMAT);
+
+list @GSITS_SALES_STAGE;
+
+-- Done!
+
+-- drop the tables and load it again 
+drop table SALES_TRANSACTIONS;
+drop table products;
+
+
+
+-- create empty tables to load the data into it 
+-- load it from stage
+-- 1- create it 
+
+create or replace table PRODUCTS(
+Product_Id int identity(1,1) primary key,
+Product_Name VARCHAR(50) not null,
+Category VARCHAR(50) not null, 
+Unit_Price int
+);
+
+create or replace table SALES_TRANSACTIONS(
+TRANSACTION_ID int identity(1,1) primary key,
+TRANSACTION_TIMESTAMP TIMESTAMP_NTZ,
+Product_Id int,
+foreign key (Product_Id) references PRODUCTS (Product_Id),
+QUANTITY_SOLD int,
+SALE_AMOUNT number,
+REGION VARCHAR(50)
+);
+
+
+copy into products
+from @GSITS_SALES_STAGE/Product
+file_format = (format_name = CSV_format);
+
+select * from products;
+
+copy into SALES_TRANSACTIONS
+from @GSITS_SALES_STAGE/SALES_TRANSACTIONS
+file_format = (format_name = CSV_format);
+
+select * from sales_transactions;
+
+-- Done
+
+
+
+-- 2.2 create temp table 
+
+CREATE OR REPLACE TEMPORARY TABLE TEMP_INVENTORY_ADJUSTMENTS (
+    PRODUCT_ID INT,
+    ADJUSTMENT_TYPE VARCHAR(10),
+    ADJUSTMENT_QUANTITY INT
+);
+
+CREATE OR REPLACE TABLE INVENTORY_IN(
+    PRODUCT_ID INT,
+    QUANTITY INT
+);
+
+CREATE OR REPLACE TABLE INVENTORY_OUT(
+    PRODUCT_ID INT,
+    QUANTITY INT
+);
+
+-- insert into temp_table to use both tables
+INSERT INTO TEMP_INVENTORY_ADJUSTMENTS (PRODUCT_ID, ADJUSTMENT_TYPE, ADJUSTMENT_QUANTITY)
+SELECT
+    PRODUCT_ID,
+    CASE MOD(SEQ4(), 2)
+        WHEN 0 THEN 'IN'
+        ELSE 'OUT'
+    END,
+    UNIFORM(1, 20, RANDOM())
+FROM PRODUCTS
+SAMPLE (20);  -- pick 20 random products
+
+select * from temp_inventory_adjustments;
+
+
+
+-- insert the data using insert all 
+INSERT ALL
+    WHEN ADJUSTMENT_TYPE = 'IN' THEN
+        INTO INVENTORY_IN (PRODUCT_ID, QUANTITY) VALUES (PRODUCT_ID, ADJUSTMENT_QUANTITY)
+    WHEN ADJUSTMENT_TYPE = 'OUT' THEN
+        INTO INVENTORY_OUT (PRODUCT_ID, QUANTITY) VALUES (PRODUCT_ID, ADJUSTMENT_QUANTITY)
+SELECT * FROM TEMP_INVENTORY_ADJUSTMENTS;
+
+
+-- Query SQL on transaction_sales
+select * from sales_transactions;
+
+
+select month(TRANSACTION_TIMESTAMP) as Month_number, lower(region) as Region,
+        case 
+            when SALE_AMOUNT > 750 
+                then 'High'
+            else
+                'Low'
+        end as type_sale,
+    sum(sale_amount) as Total_sale
+
+from sales_transactions
+group by MONTH(TRANSACTION_TIMESTAMP), 
+         Lower(region),
+         case
+            when sale_amount > 750
+                then 'High'
+            else 
+                'Low'
+        end;
+
+
+
+------------------------------------------------ 3.0 ------------------------------------------------
+------------------------------------------------ Using Time_travil/Query Performance and Caching ------------------------------------------------
+------------------------------------------------ Cloning for Development (DDL/DML) ------------------------------------------------
+
+
+-- using Time_travel 
+-- set the context 
+-- set the query to save the table
+
+-- one join SQL 
+-- join the two table to make it used in dev_schema!
+
+
+create or replace table Sales as
+SELECT 
+    s.TRANSACTION_ID,
+    s.TRANSACTION_TIMESTAMP,
+    s.PRODUCT_ID,
+    s.QUANTITY_SOLD,
+    s.SALE_AMOUNT,
+    s.REGION,
+    p.PRODUCT_NAME,
+    p.CATEGORY,
+    p.UNIT_PRICE
+from sales_transactions s 
+join products p
+on s.product_id = p.product_id;
+
+
+select * from sales;
+delete from sales;
+
+
+SET dev_last_table = LAST_QUERY_ID();
+
+select * from sales
+before(statement=>$dev_last_table);
+
+
+
+
+-- now clone the table and make new one 
+create or replace table Dev_sales clone sales
+before(statement=>$dev_last_table);
+
+
+-- clone the whole schema 
+create or replace schema DEV_SALES_DATA clone SALES_DATA;
+
+-- for now use sales_Data for testing 
+use schema SALES_DATA;
+
+
+---------------------------------------------------- 4.0 ------------------------------------------------
+------------------------------------------------ Create Procedures/UDFS ------------------------------------------------
+------------------------------------------------ Create Window function ------------------------------------------------
+
+show tables;
+
+select * from Dev_sales;
+
+
+
+-- basic UDF 
+-- UDF alawys return a value not like procedure using DML/DDL (insert/delete/Drop/create etc)
+CREATE OR REPLACE FUNCTION UDF_CALCULATE_COMMISSION(x NUMBER)
+RETURNS NUMBER(18,2)
+LANGUAGE SQL
+AS
+$$
+    x * 0.05
+$$;
+
+
+-- using it using select to new what the commision percentages of the sales 
+select sale_amount, UDF_CALCULATE_COMMISSION(sale_amount) as Commission from dev_sales;
+
+
+-- 2 
+create or replace function UDTF_REGION_PRODUCTS(x VARCHAR)
+returns table (PRODUCT_NAME VARCHAR, QUANTITY_SOLD INT)
+as
+    $$
+        select Distinct(PRODUCT_NAME), QUANTITY_SOLD from DEV_sales
+        where region = x
+        order by PRODUCT_NAME asc
+    $$;
+
+-- select - use UDF
+
+select * from table(UDTF_REGION_PRODUCTS('NA'))
+select * from dev_sales;
+
+-- using window function to see the increase in the sale_amount
+-- count the increase in the sale_amount by the category types
+select transaction_ID,category,sum(sale_amount) over(partition by category order by transaction_ID) as adding_amount
+from dev_sales
+order by category,transaction_ID;
+
+-- make a procedure to insert into temp table 
+
+create or replace table DAILY_SALES_SUMMARY(
+SUMMARY_DATE date, TOTAL_SALES_AMOUNT int, TOTAL_TRANSACTIONS int);
+
+        
+create or replace procedure SP_LOG_DAILY_SALES_SUMMARY()
+returns VARCHAR NOT NULL
+language sql
+as 
+    begin 
+        insert into DAILY_SALES_SUMMARY (SUMMARY_DATE, TOTAL_SALES_AMOUNT, TOTAL_TRANSACTIONS)
+        select 
+            current_date as SUMMARY_DATE,
+            sum(sale_amount) as TOTAL_SALES_AMOUNT,
+            count(*) as TOTAL_TRANSACTIONS
+        from dev_sales
+        where transaction_timestamp::date = current_date;
+        RETURN 'Procedures its complete.';
+    end;
+
+call SP_LOG_DAILY_SALES_SUMMARY();
+
+---------------------------------------------------------------- 5 -------------------------------------------------------------------
+------------------------------------------------ Automation, Security, and Management ------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------------
+
+-- automation for the dev_sales to save the transactions of whole day (daily)
+create or replace task TASK_DAILY_SUMMARY
+    WAREHOUSE = 'COMPUTATION_WH'
+    SCHEDULE = '24 HOURS'
+as
+    call SP_LOG_DAILY_SALES_SUMMARY();
+
+
+-- start the task
+alter task TASK_DAILY_SUMMARY resume;
+
+-- make it work now!!
+EXECUTE TASK TASK_DAILY_SUMMARY;
+
+-- see the status of tasks
+DESCRIBE TASK TASK_DAILY_SUMMARY;
+SHOW TASKS;
+
+-- stop it if need 
+-- alter task TASK_DAILY_SUMMARY suspend;
+
+
+-- access control 
+-- create new role
+
+-- 1. Create the role
+create or replace role SALES_ANALYST_ROLE;
+
+-- 2. Grant privileges on the database and schema
+grant usage on database GSITS_DB to role SALES_ANALYST_ROLE;
+grant usage on schema GSITS_DB.SALES_DATA to role SALES_ANALYST_ROLE;
+
+-- 3. Grant SELECT privilege on the table
+grant select on table GSITS_DB.SALES_DATA.SALES_TRANSACTIONS to role SALES_ANALYST_ROLE;
+
+-- 4. Create the user
+create or replace user ANALYST_USER
+    password = 'xxxxx'  -- replace with a secure password
+    default_role = SALES_ANALYST_ROLE
+    default_warehouse = COMPUTATION_WH
+    must_change_password = true;
+
+-- 5. Assign the role to the user
+grant role SALES_ANALYST_ROLE to user ANALYST_USER;
+
+
+-- last step its to onload the daily_table to stage
+-- 1 Create internal stage 
+create or replace stage GSITS_UNLOAD_STAGE
+    file_format = (type = 'JSON' compression = 'GZIP');
+
+-- 2 Unload multiple columns as JSON using OBJECT_CONSTRUCT(*) >> needed for json
+copy into @GSITS_UNLOAD_STAGE/DAILY_SALES_SUMMARY_
+from (
+    select object_construct(*) from DAILY_SALES_SUMMARY
+)
+file_format = (type = 'JSON' compression = 'GZIP')
+overwrite = true;
+
+list @GSITS_UNLOAD_STAGE;g
+-------------------------------------------------------------
+---------------------------- END ----------------------------
+-------------------- By : Meshal Alsanari -------------------
+-------------------------------------------------------------
