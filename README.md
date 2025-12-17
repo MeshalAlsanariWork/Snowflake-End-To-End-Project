@@ -1,4 +1,6 @@
-![Diagram](https://github.com/user-attachments/assets/3596f702-7925-4cbe-9fdf-4371331f1916)# ❄️ Snowflake End-to-End Data Engineering Project
+![Diagram](https://github.com/user-attachments/assets/3596f702-7925-4cbe-9fdf-4371331f1916)# 
+
+❄️ Snowflake End-to-End Data Engineering Project
 
 ## 🌟 Introduction
 In the modern data landscape, efficiency, automation, and security are the pillars of a successful data warehouse. This project, **GSITS (Global Sales and Inventory Tracking System)**, is a hands-on implementation of a full-scale Snowflake environment. It moves beyond basic queries to demonstrate how a Data Engineer manages the entire lifecycle of data—from ingestion to automation and governance—using only Snowflake’s native SQL and scripting capabilities.
@@ -72,8 +74,6 @@ By exploring this repository, you will understand how to:
 1. Open the `snowflake_project.sql` file.
 2. Copy the code into a Snowflake Worksheet.
 3. Execute the blocks sequentially to build the environment, load data, and trigger automation.
-
-![Diagram](https://github.com/user-attachments/assets/73715348-8239-4779-8ebb-fef5a33c5baa)
 
 
 ## 🏁 Outro
